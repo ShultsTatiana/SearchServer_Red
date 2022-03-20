@@ -15,36 +15,43 @@ SearchServer::SearchServer(istream& document_input) {
     UpdateDocumentBase(document_input);
 }
 
-void SearchServer::UpdateDocumentBase(istream& document_input) {
+void SearchServer::Update(istream& document_input) {
     InvertedIndex new_index;
 
     for (string current_document; getline(document_input, current_document); ) {
         new_index.Add(move(current_document));
     }
-
-    index = move(new_index);
+    {
+        index.GetAccess().ref_to_value = move(new_index);
+    }
 }
 
-void SearchServer::AddQueriesStream( istream& query_input, 
-                                     ostream& search_results_output ) {
+
+void SearchServer::UpdateDocumentBase(istream& document_input) {
+    //threadeFutures.push_back(async(&SearchServer::Update, this, ref(document_input)));
+    Update(document_input);
+}
+
+void SearchServer::AddQueriesSingleTread(istream& query_input, ostream& search_results_output) {
+    
     for (string current_query; getline(query_input, current_query); ) {
         const auto words = SplitIntoWords(current_query);
-		
-		//один раз создаём вектор для хранения рейтинга документов
-		size_t Ndoc(index.getNumbDoc());
-		vector<pair<size_t, size_t>> search_results(Ndoc);
-
-        for (const auto& word : words) {
-            const auto mapPtr = index.Lookup(word);
-            if (mapPtr != nullptr) {
-                for (const auto& [docid, count] : *mapPtr) {
-					search_results[docid].first = docid;
-                    search_results[docid].second += count;
+        vector<pair<size_t, size_t>>search_results;
+        {
+            auto acsess = index.GetAccess();
+            search_results.resize(acsess.ref_to_value.getNumbDoc());
+            for (const auto& word : words) {
+                const auto mapPtr = acsess.ref_to_value.Lookup(word);
+                if (mapPtr != nullptr) {
+                    for (const auto& [docid, count] : *mapPtr) {
+                        search_results[docid].first = docid;
+                        search_results[docid].second += count;
+                    }
                 }
             }
         }
-        partial_sort(begin(search_results), 
-            (begin(search_results) + (5 < Ndoc ? 5: Ndoc)),
+        partial_sort(begin(search_results),
+            (begin(search_results) + (5 < search_results.size() ? 5 : search_results.size())),
             end(search_results),
             [](pair<size_t, size_t> lhs, pair<size_t, size_t> rhs) {
                 int64_t lhs_docid = lhs.first;
@@ -52,17 +59,19 @@ void SearchServer::AddQueriesStream( istream& query_input,
                 return make_pair(lhs.second, -lhs_docid) > make_pair(rhs.second, -rhs_docid);
             }
         );
-
         search_results_output << current_query << ':';
         for (auto [docid, hitcount] : Head(search_results, 5)) {
             if (hitcount != 0) {
-                search_results_output << " {"
-                    << "docid: " << docid << ", "
+                search_results_output << " {" << "docid: " << docid << ", "
                     << "hitcount: " << hitcount << '}';
             }
         }
         search_results_output << '\n';
     }
+}
+
+void SearchServer::AddQueriesStream(istream& query_input, ostream& search_results_output) {
+    threadeFutures.push_back(async(&SearchServer::AddQueriesSingleTread, this, ref(query_input), ref(search_results_output)));
 }
 
 void LeftStrip(string_view& sv) {
@@ -111,5 +120,14 @@ const vector<pair<size_t, size_t>>* InvertedIndex::Lookup(const string& word) co
     }
     else {
         return nullptr;
+    }
+}
+
+vector<pair<size_t, size_t>> InvertedIndex::LookupV(const string& word) const {
+    if (auto it = index.find(word); it != index.end()) {
+        return it->second;
+    }
+    else {
+        return {};
     }
 }
